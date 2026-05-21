@@ -8,6 +8,7 @@
 
 #include "faest_impl.h"
 #include "aes.h"
+#include "faest_agg_layout.h"
 #include "faest_aes.h"
 #include "randomness.h"
 #include "random_oracle.h"
@@ -525,4 +526,38 @@ int faest_verify(const uint8_t* msg, size_t msglen, const uint8_t* sig, const ui
 
   // Step 21
   return memcmp(chall_3, dsignature_chall_3(sig, params), lambda_bytes) == 0 ? 0 : -1;
+}
+
+// === Aggregate (5-round multi-signer) ===
+// Phase 1 stub. Round-by-round implementation lives in faest_agg_signer.c and
+// faest_agg_aggregator.c; this verifier consumes the finalized transcript.
+
+size_t faest_aggregate_signature_size(size_t signer_count, const faest_paramset_t* params) {
+  faest_agg_signature_layout_t layout;
+  if (!faest_agg_compute_signature_layout(&layout, signer_count, params)) {
+    return 0;
+  }
+  return layout.total_bytes;
+}
+
+int faest_aggregate_verify(const uint8_t* msg, size_t msg_len, const uint8_t* sig,
+                           size_t sig_len, const uint8_t* const* owf_inputs,
+                           const uint8_t* const* owf_outputs, size_t signer_count,
+                           const faest_paramset_t* params) {
+  if (!sig || !owf_inputs || !owf_outputs || !params || (!msg && msg_len) || signer_count == 0) {
+    return -1;
+  }
+
+  faest_agg_signature_layout_t layout;
+  if (!faest_agg_compute_signature_layout(&layout, signer_count, params) ||
+      sig_len != layout.total_bytes) {
+    return -1;
+  }
+  for (size_t j = 0; j < signer_count; ++j) {
+    if (!owf_inputs[j] || !owf_outputs[j]) {
+      return -1;
+    }
+  }
+  // Phase 1 stub: structural validation only. Real verifier implemented in Phase 2.
+  return -1;
 }
