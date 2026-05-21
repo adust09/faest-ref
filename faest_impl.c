@@ -678,11 +678,6 @@ int faest_aggregate_verify(const uint8_t* msg, size_t msg_len, const uint8_t* si
   if (!sig || !owf_inputs || !owf_outputs || !params || (!msg && msg_len) || signer_count == 0) {
     return -1;
   }
-  // Phase 2B implements only n=1. n>1 requires chall_1-power combination of
-  // ũ_j and V_tilde_j (Phase 2C).
-  if (signer_count != 1) {
-    return -1;
-  }
 
   faest_agg_signature_layout_t layout;
   if (!faest_agg_compute_signature_layout(&layout, signer_count, params) ||
@@ -711,33 +706,37 @@ int faest_aggregate_verify(const uint8_t* msg, size_t msg_len, const uint8_t* si
   faest_agg_verify_hash_mu(mu, owf_inputs, owf_outputs, signer_count, msg, msg_len, params);
 
   int ret = -1;
-  uint8_t** q = NULL;
+  uint8_t* per_signer_hcom_storage = NULL;
   uint8_t** per_signer_hcom = NULL;
-  uint8_t* hcom_recon_buffer = NULL;
-  uint8_t* q_storage = NULL;
+  uint8_t** q_view = NULL;                 // [lambda] view into the current signer's Q
+  uint8_t*** q_all = NULL;                 // q_all[j][i] = row i of Q_j
+  uint8_t** q_row_storage = NULL;          // q_row_storage[j] = base of Q_j
 
-  // Allocate per-signer reconstructed h_com_j and Q_j matrices.
+  // Allocate per-signer reconstructed h_com_j storage.
   per_signer_hcom = (uint8_t**)calloc(signer_count, sizeof(uint8_t*));
-  hcom_recon_buffer = (uint8_t*)calloc(signer_count, MAX_LAMBDA_BYTES * 2);
-  if (!per_signer_hcom || !hcom_recon_buffer) {
+  per_signer_hcom_storage = (uint8_t*)calloc(signer_count, MAX_LAMBDA_BYTES * 2);
+  if (!per_signer_hcom || !per_signer_hcom_storage) {
     goto cleanup;
   }
   for (size_t j = 0; j < signer_count; ++j) {
-    per_signer_hcom[j] = hcom_recon_buffer + j * MAX_LAMBDA_BYTES * 2;
+    per_signer_hcom[j] = per_signer_hcom_storage + j * MAX_LAMBDA_BYTES * 2;
   }
 
-  // For n=1 we reconstruct a single Q matrix. For n>1 (Phase 2C) we would
-  // allocate signer_count of them.
-  q = (uint8_t**)malloc(lambda * sizeof(uint8_t*));
-  if (!q) {
+  // Allocate per-signer Q_j matrices.
+  q_all          = (uint8_t***)calloc(signer_count, sizeof(uint8_t**));
+  q_row_storage  = (uint8_t**)calloc(signer_count, sizeof(uint8_t*));
+  if (!q_all || !q_row_storage) {
     goto cleanup;
   }
-  q_storage = (uint8_t*)calloc(lambda, ell_hat_bytes);
-  if (!q_storage) {
-    goto cleanup;
-  }
-  for (unsigned int i = 0; i < lambda; ++i) {
-    q[i] = q_storage + i * ell_hat_bytes;
+  for (size_t j = 0; j < signer_count; ++j) {
+    q_all[j]         = (uint8_t**)malloc(lambda * sizeof(uint8_t*));
+    q_row_storage[j] = (uint8_t*)calloc(lambda, ell_hat_bytes);
+    if (!q_all[j] || !q_row_storage[j]) {
+      goto cleanup;
+    }
+    for (unsigned int i = 0; i < lambda; ++i) {
+      q_all[j][i] = q_row_storage[j] + i * ell_hat_bytes;
+    }
   }
 
   // Per-signer VOLE reconstruction.
@@ -745,7 +744,7 @@ int faest_aggregate_verify(const uint8_t* msg, size_t msg_len, const uint8_t* si
     uint8_t iv_j[IV_SIZE];
     hash_iv(iv_j, faest_agg_sig_iv_pre_const(sig, &layout, j), lambda);
 
-    if (!vole_reconstruct(per_signer_hcom[j], q, iv_j, sig_chall_3,
+    if (!vole_reconstruct(per_signer_hcom[j], q_all[j], iv_j, sig_chall_3,
                           faest_agg_sig_pdecom_const(sig, &layout, j),
                           faest_agg_sig_c_const(sig, &layout, j), ell_hat, params)) {
       goto cleanup;
@@ -764,8 +763,8 @@ int faest_aggregate_verify(const uint8_t* msg, size_t msg_len, const uint8_t* si
   uint8_t chall_1[5 * MAX_LAMBDA_BYTES + 8];
   faest_agg_verify_hash_chall_1(chall_1, mu, hcom_combined, sig, &layout, params);
 
-  // Recompute chall_2. For n=1, V_tilde_agg[i] = vole_hash(chall_1, q[i], ell)
-  // XOR (chall_3 bit i ? ũ_agg : 0).
+  // Recompute chall_2. V_tilde_agg[i] = (XOR_j vole_hash(chall_1, q_j[i], ell))
+  //                                     XOR (chall_3_bit_i · ũ_agg).
   const uint8_t* u_tilde_agg = faest_agg_sig_u_tilde_agg_const(sig, &layout);
 
   H2_context_t chall_2_ctx;
@@ -774,8 +773,13 @@ int faest_aggregate_verify(const uint8_t* msg, size_t msg_len, const uint8_t* si
   H2_update(&chall_2_ctx, u_tilde_agg, u_tilde_bytes);
   {
     uint8_t v_tilde_agg[MAX_LAMBDA_BYTES + UNIVERSAL_HASH_B];
+    uint8_t partial[MAX_LAMBDA_BYTES + UNIVERSAL_HASH_B];
     for (unsigned int i = 0; i < lambda; ++i) {
-      vole_hash(v_tilde_agg, chall_1, q[i], ell, lambda);
+      memset(v_tilde_agg, 0, u_tilde_bytes);
+      for (size_t j = 0; j < signer_count; ++j) {
+        vole_hash(partial, chall_1, q_all[j][i], ell, lambda);
+        xor_u8_array(v_tilde_agg, partial, v_tilde_agg, u_tilde_bytes);
+      }
       if (ptr_get_bit(sig_chall_3, i)) {
         xor_u8_array(v_tilde_agg, u_tilde_agg, v_tilde_agg, u_tilde_bytes);
       }
@@ -788,16 +792,16 @@ int faest_aggregate_verify(const uint8_t* msg, size_t msg_len, const uint8_t* si
   uint8_t chall_2[3 * MAX_LAMBDA_BYTES + 8];
   H2_2_final(&chall_2_ctx, chall_2, 3 * lambda_bytes + 8);
 
-  // Per-signer aes_<λ>_verifier with zero a1/a2 yields per-signer q_tilde.
-  // For n=1 this is the only signer.
+  // Per-signer aes_<λ>_verifier with zero a1/a2 yields per-signer q_tilde_j;
+  // XOR-sum them.
   uint8_t zero_a1[MAX_LAMBDA_BYTES] = {0};
   uint8_t zero_a2[MAX_LAMBDA_BYTES] = {0};
   uint8_t sum_q_tilde[MAX_LAMBDA_BYTES] = {0};
 
   for (size_t j = 0; j < signer_count; ++j) {
     uint8_t partial[MAX_LAMBDA_BYTES];
-    aes_verify(partial, faest_agg_sig_d_const(sig, &layout, j), q, chall_2, sig_chall_3, zero_a1,
-               zero_a2, owf_inputs[j], owf_outputs[j], params);
+    aes_verify(partial, faest_agg_sig_d_const(sig, &layout, j), q_all[j], chall_2, sig_chall_3,
+               zero_a1, zero_a2, owf_inputs[j], owf_outputs[j], params);
     xor_u8_array(sum_q_tilde, partial, sum_q_tilde, lambda_bytes);
   }
 
@@ -815,9 +819,22 @@ int faest_aggregate_verify(const uint8_t* msg, size_t msg_len, const uint8_t* si
   ret = memcmp(chall_3_check, sig_chall_3, lambda_bytes) == 0 ? 0 : -1;
 
 cleanup:
+  if (q_all) {
+    for (size_t j = 0; j < signer_count; ++j) {
+      if (q_all[j]) {
+        free(q_all[j]);
+      }
+    }
+    free(q_all);
+  }
+  if (q_row_storage) {
+    for (size_t j = 0; j < signer_count; ++j) {
+      free(q_row_storage[j]);
+    }
+    free(q_row_storage);
+  }
   free(per_signer_hcom);
-  free(hcom_recon_buffer);
-  free(q);
-  free(q_storage);
+  free(per_signer_hcom_storage);
+  (void)q_view; (void)ell_hat_bytes;
   return ret;
 }

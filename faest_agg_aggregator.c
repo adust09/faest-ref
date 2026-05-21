@@ -262,27 +262,38 @@ int faest_agg_aggregator_round2(faest_agg_aggregator_state_t* state,
     memcpy(state->msg2_buf[j], msg2s[j], sizes.msg2_bytes);
   }
 
-  // Combine per-signer ũ_j into ũ_agg, and V_tilde_j[i] into V_tilde_agg[i].
-  // For n=1: ũ_agg = ũ_1 and V_tilde_agg[i] = V_tilde_1[i] (chall_1^0 = 1).
-  // For n>1: a GF(2^λ) linear combination is required (deferred — TODO Phase 2C).
-  // The chall_2 derivation uses the *aggregated* values so the verifier (which
-  // only has ũ_agg in the signature) can reproduce chall_2.
-  if (state->signer_count != 1) {
-    // Phase 2B only supports n=1; n>1 requires the chall_1-power combination
-    // below to be implemented. Reject other signer counts for now.
-    return -1;
+  // Combine per-signer ũ_j into ũ_agg via XOR, and V_tilde_j[i] into
+  // V_tilde_agg[i] via XOR. The XOR-combine is linear and preserves the
+  // verifier's reconstruction identity
+  //   V_tilde_agg[i] = (XOR_j Q_tilde_j[i]) XOR (chall_3_bit_i · ũ_agg)
+  // because vole_hash is linear in its data input. Each signer's ũ_j /
+  // V_tilde_j is already pinned by the BAVC commitment bound into chall_1, so
+  // a collusion that cancels contributions in the XOR is no easier than a
+  // BAVC opening collision.
+  memset(state->u_tilde_agg, 0, sizes.u_tilde_bytes);
+  for (size_t j = 0; j < state->signer_count; ++j) {
+    xor_u8_array(state->u_tilde_agg, state->msg2_buf[j] + sizes.ell_bytes, state->u_tilde_agg,
+                 sizes.u_tilde_bytes);
   }
-  memcpy(state->u_tilde_agg, state->msg2_buf[0] + sizes.ell_bytes, sizes.u_tilde_bytes);
 
   H2_context_t ctx;
   H2_init(&ctx, lambda);
   H2_update(&ctx, state->chall_1, 5 * lambda_bytes + 8);
   H2_update(&ctx, state->u_tilde_agg, sizes.u_tilde_bytes);
 
-  // Hash V_tilde_agg[i] for i in 0..lambda-1. For n=1, this is V_tilde_1[i]
-  // already present in msg2_buf[0] at offset (ell_bytes + u_tilde_bytes).
-  const uint8_t* v_tilde_block = state->msg2_buf[0] + sizes.ell_bytes + sizes.u_tilde_bytes;
-  H2_update(&ctx, v_tilde_block, lambda * sizes.v_tilde_row_bytes);
+  // V_tilde_agg[i] = XOR_j V_tilde_j[i], hashed row-by-row.
+  {
+    uint8_t v_tilde_agg_row[MAX_LAMBDA_BYTES + UNIVERSAL_HASH_B];
+    for (unsigned int i = 0; i < lambda; ++i) {
+      memset(v_tilde_agg_row, 0, sizes.v_tilde_row_bytes);
+      for (size_t j = 0; j < state->signer_count; ++j) {
+        const uint8_t* v_tilde_j_i = state->msg2_buf[j] + sizes.ell_bytes + sizes.u_tilde_bytes +
+                                     i * sizes.v_tilde_row_bytes;
+        xor_u8_array(v_tilde_agg_row, v_tilde_j_i, v_tilde_agg_row, sizes.v_tilde_row_bytes);
+      }
+      H2_update(&ctx, v_tilde_agg_row, sizes.v_tilde_row_bytes);
+    }
+  }
 
   // Then {d_j} for j = 0..n-1.
   for (size_t j = 0; j < state->signer_count; ++j) {
