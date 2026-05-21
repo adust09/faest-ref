@@ -1,65 +1,90 @@
-This protocol natively resolves the scalability problem of multi-signature settings while preserving FAEST v2's strong post-quantum security and efficiency.
+We natively extend BAVC (Batch All-but-One Vector Commitments) and QuickSilver (degree-3 constraints) — the core algorithms of FAEST v2 (Shorter, Tighter, FAESTer) — to define a rigorous and secure 5-round aggregate signature protocol in which multiple signers collaboratively produce a signature on the same message.
 
-### 1. Prerequisites and Setup
-
-- **Participants**: $n$ signers $P_j (j=1 \dots n)$, a single aggregator $Agg$ (which may be one of the signers), and a verifier $V$.
-- **Message**: a common message $msg$ shared by all parties.
-- **Public information**: each signer's public key $pk_j = (x_j, y_j)$, where $y_j = AES_{k_j}(x_j)$.
-- **Secret information**: each signer's secret key $sk_j = k_j$.
-- **Security parameter**: $\lambda = 128$.
+The protocol is designed so that challenge synchronization is strictly enforced in order for QuickSilver's polynomial aggregation (amortization) to work correctly, eliminating any security degradation that shortcuts would introduce.
 
 ---
 
-### 2. Protocol Phases
+### FAEST v2 Native Aggregate Signature Protocol (5-Round Construction)
 
-### Phase 1: Collective Commitment (Collective BAVC)
-
-The goal of this phase is to merge the random seeds of all signers into a single tree structure.
-
-1. **Individual seed generation**: Each signer $P_j$ locally generates a root seed $r_j$ and a pre-IV $iv_{pre,j}$.
-2. **Subtree construction**: Each signer expands a GGM tree from $r_j$ and sends its partial root hash (or all leaf commitments $com_{i,j}$) to the aggregator $Agg$.
-3. **Tree merging**: $Agg$ builds a single large GGM tree (BAVC) whose leaves are the $n$ signers' subtrees, and computes the overall root hash $h_{com}$.
-4. **Derivation of the first challenge $chall_1$**:
-    - $Agg$ derives $chall_1$ by hashing the following values together.
-    - $chall_1 = H(pk_1, \dots, pk_n, msg, h_{com}, iv_{pre,1}, \dots, iv_{pre,n})$
-    - **Important**: To prevent key-substitution attacks, the public keys of all participants must be included in the hash input.
-
-### Phase 2: Local Proof Generation and Masking
-
-Each signer $P_j$ computes the intermediate data required for verification while keeping its own secret hidden.
-
-1. **VOLE correlation generation**: After receiving $chall_1$, the signer generates the VOLE secret $u_j$ and MAC tag $V_j$ from its own tree.
-2. **Witness masking**: From the secret key $k_j$, the signer constructs the extended witness $w_j$ that demonstrates satisfiability of the AES circuit, and computes the masked witness $d_j = w_j \oplus u_j$.
-3. **Degree-3 constraint computation**: Following the QuickSilver v2 logic, the signer computes the coefficients $(a_{0,j}, a_{1,j}, a_{2,j})$ of every constraint polynomial arising from its AES circuit.
-    - Here we apply the degree-3 optimization based on Galois theory.
-4. **Transmission**: Each signer sends $(d_j, a_{0,j}, a_{1,j}, a_{2,j}, \tilde{u}_j)$ to the aggregator $Agg$.
-
-### Phase 3: Linear Proof Aggregation
-
-The aggregator $Agg$ physically and logically compresses the data received from the $n$ signers.
-
-1. **Summation of polynomial coefficients**: Exploiting the additive homomorphism of QuickSilver, the polynomial coefficients are summed element-wise.
-    - $\tilde{a}*{i, agg} = \sum*{j=1}^n a_{i,j}$ (for $i=0, 1, 2$)
-2. **Update of $chall_2, chall_3$**: From the list of hashed VOLE secrets $\tilde{u}_j$ and $d_j$ contributed by all signers, the common $chall_2$ and $chall_3$ are derived via Fiat-Shamir.
-3. **Decommitment extraction**: Based on $chall_3$, the "non-revealed paths" of the tree are identified. The common node information corresponding to the hidden index set $I$ across all signers is bundled into a single $pdecom$.
-4. **Aggregate signature construction**: The final aggregate signature $\sigma_{agg}$ is output.
-    - $\sigma_{agg} = (h_{com}, {d_j}*{j=1}^n, \tilde{u}*{agg}, \tilde{a}*{1, agg}, \tilde{a}*{2, agg}, pdecom, chall_3, ctr)$
-
-### Phase 4: Batch Verification
-
-With almost the same procedure as verifying a single signature, the verifier $V$ confirms the validity of all signers at once.
-
-1. **Batch reconstruction of VOLE shares**: Using $h_{com}$ and $pdecom$ from $\sigma_{agg}$, the verifier batch-reconstructs the VOLE shares $Q_1, \dots, Q_n$ for all $n$ AES circuits (one per signer).
-2. **Aggregate polynomial evaluation**: $V$ re-derives $chall_1, chall_2$ from all public keys ${pk_j}$ and $msg$, and uses the received aggregate coefficients $\tilde{a}_{agg}$ to check the following equality only once.
-    - $\hat{a}*{0} \stackrel{?}{=} \tilde{a}*{0, agg}$
-3. **Acceptance**: If the equality holds and the grinding $ctr$ is consistent with $chall_3$, the signatures of all $n$ signers are accepted.
+#### 1. Prerequisites
+*   **Common message**: $msg$
+*   **Participants**: signers $P_1, \dots, P_n$ and an aggregator $Agg$ that orchestrates aggregation (one of the signers may take on this role).
+*   **Public keys**: $pk_j = (x_j, y_j)$ for each signer, where $y_j = E_{k_j}(x_j)$.
+*   **Secret keys**: $sk_j = k_j$ for each signer.
+*   **Security parameter**: $\lambda = 128$.
 
 ---
 
-### 3. Security and Performance Properties
+#### 2. Protocol Steps
 
-- **Secret-key safety**: Since each signer only releases information in the form $d_j = w_j \oplus u_j$, neither the aggregator nor the verifier can recover the secret key $k_j$ (computationally, under the security of AES).
-- **Substitution resistance**: Because all $pk_j$ are bound into $chall_1$, a malicious signer cannot reuse its own proof against someone else's public key.
-- **Scalability**:
-    - **Communication**: The hash value, polynomial coefficients, and shared challenges are all aggregated into $O(1)$. The only quantity that grows with the number of signers is the list of $d_j$.
-    - **Computational cost**: Because the non-linear polynomial check is collapsed into a single evaluation, the verification time is dramatically shorter than the sum of individual verifications.
+### Round 1: Collective Commitment (Collective BAVC)
+**Goal: Combine the seed information of all signers and fix a single root hash.**
+
+1.  **Signer $P_j$**:
+    *   Locally generate a root seed $r_j$ and a pre-IV $iv_{pre, j}$.
+    *   Build its own subtree (a portion of the GGM tree) and send the hash of its leaf commitments to the aggregator.
+2.  **Aggregator $Agg$**:
+    *   Compute the root hash $h_{com}$ of a single large GGM tree (BAVC) that contains every signer's subtree.
+    *   Hash all participants' public keys, the message, the root hash, and all pre-IVs together to derive the first challenge $chall_1$.
+    *   Distribute $h_{com}$ and $chall_1$ to all signers.
+    *   **Security**: Including every public key in $chall_1$ completely prevents key-substitution attacks.
+
+### Round 2: Witness Masking and VOLE Hash Presentation
+**Goal: Allow signers to provide the aggregator with the intermediate data required for verification while keeping their secret keys hidden.**
+
+1.  **Signer $P_j$**:
+    *   Using the received $chall_1$, generate the VOLE correlation (secret $u_j$, tag $V_j$).
+    *   Build the extended witness $w_j$ from the secret key $k_j$ and compute the masked witness $d_j = w_j \oplus u_j$.
+    *   Compute the VOLE consistency-check hashes $\tilde{u}_j, \tilde{V}_j$.
+    *   Send $(d_j, \tilde{u}_j, \tilde{V}_j)$ to the aggregator.
+2.  **Aggregator $Agg$**:
+    *   Collect $d_j, \tilde{u}_j, \tilde{V}_j$ from every signer and derive the second challenge $chall_2$ by hashing them as input.
+    *   Distribute $chall_2$ to all signers.
+
+### Round 3: Additive Aggregation of QuickSilver Constraints
+**Goal: Have all signers generate their proof polynomials using the same weighting coefficients so that aggregation becomes possible.**
+
+1.  **Signer $P_j$**:
+    *   Using the random coefficients derived from $chall_2$, evaluate the degree-3 constraints of its own AES circuit.
+    *   Following the QuickSilver v2 logic, compute the three weighted polynomial coefficients $(a_{0,j}, a_{1,j}, a_{2,j})$.
+    *   Send them to the aggregator.
+2.  **Aggregator $Agg$**:
+    *   Exploiting the linear homomorphism of QuickSilver, sum every signer's coefficients to produce the aggregate coefficients.
+        *   $\tilde{a}_{i, agg} = \sum a_{i,j}$ (for $i=0, 1, 2$)
+    *   This compresses the main part of the proof to $O(1)$, independent of the number of signers.
+
+### Round 4: Grinding and Finalization of the Last Challenge
+**Goal: Generate the final, compute-bound challenge once all data has been collected.**
+
+1.  **Aggregator $Agg$**:
+    *   Combine the aggregated proof coefficients $\tilde{a}_{agg}$ with the previous challenges and run grinding with a counter $ctr$.
+    *   Repeat the computation until the trailing bits of the hash value are zero for the specified number of bits, fixing the final challenge $chall_3$.
+    *   Notify all signers of the successful $chall_3$ and $ctr$.
+
+### Round 5: Generation of the Partial Decommitment (Punctured Path)
+**Goal: Based on the final challenge, reveal the tree while keeping the unnecessary seed information hidden.**
+
+1.  **Signer $P_j$**:
+    *   Using the "hidden index" obtained by decoding $chall_3$, extract the nodes within its own subtree that need to be revealed (the decommitment information $pdecom_j$).
+    *   Send them to the aggregator.
+2.  **Aggregator $Agg$**:
+    *   Combine the $pdecom_j$ values from all signers and assemble the final aggregate signature $\sigma_{agg}$.
+    *   **Signature structure**: $\sigma_{agg} = (h_{com}, \{d_j\}, \tilde{u}_{agg}, \tilde{a}_{1, agg}, \tilde{a}_{2, agg}, pdecom, chall_3, ctr)$
+
+---
+
+#### 3. Verification Process (Batch Verification)
+The verifier checks the validity of all signatures at once with the following procedure.
+
+1.  **Challenge reconstruction**: Recompute $chall_1, chall_2$ from all public keys, the message, $h_{com}$ contained in the signature, etc.
+2.  **Batch reconstruction of VOLE shares**: From $h_{com}$, $pdecom$, and $chall_3$, batch-reconstruct the VOLE shares $Q_1, \dots, Q_n$ for all $n$ AES circuits (one per signer).
+3.  **Single equality check**: Using the reconstructed shares and the aggregate coefficients $\tilde{a}_{agg}$, evaluate the following verification equation just once.
+    *   $\hat{a}_0 \stackrel{?}{=} \tilde{a}_{0, agg}$
+4.  If this equality holds, FAEST v2's security guarantees, on a logical level, that every signer used a correct secret key to sign the same message.
+
+---
+
+#### 4. Security and Efficiency Properties
+*   **Full secrecy of the secret key**: Each signer only externalizes the VOLE-masked witness $d_j$ and the hashed polynomial coefficients, so the secret key $k_j$ remains completely hidden even from the aggregator.
+*   **Communication efficiency**: The hashes, polynomial coefficients, and challenges are aggregated to a constant size ($O(1)$). The only quantities that grow with the number of signers are the list of $d_j$ and part of the tree opening path ($O(n)$), making the total size dramatically smaller than signing individually.
+*   **Strict ordering**: By adopting a 5-round construction that fixes $chall_2$ only after the $d_j$ values are collected, native aggregation is achieved without breaking the QuickSilver security-proof framework.
