@@ -2,12 +2,12 @@
  *  SPDX-License-Identifier: MIT
  *
  *  Smoke test for the 5-round aggregate signature (route a) using the
- *  faest_128f parameter set. Drives signer round1-5 and aggregator
+ *  faest_@PARAM_L@ parameter set. Drives signer round1-5 and aggregator
  *  round1-4 + finalize end-to-end for both n=1 and n=3, then verifies
- *  with faest_128f_aggregate_verify and exercises tamper / pk substitution.
+ *  with faest_@PARAM_L@_aggregate_verify and exercises tamper / pk substitution.
  */
 
-#include "faest_128f.h"
+#include "faest_@PARAM_L@.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -37,18 +37,18 @@ static int run_aggregate_test(size_t signer_count) {
   CHECK(pks && sks && pk_ptrs && signer_states && msg1s_buf && msg2s_buf && msg3s_buf &&
         msg5s_buf && msg1s && msg2s && msg3s && msg5s);
 
-  const size_t signer_state_size     = faest_128f_agg_signer_state_size();
-  const size_t aggregator_state_size = faest_128f_agg_aggregator_state_size(signer_count);
-  const size_t msg1_size             = faest_128f_agg_msg1_size();
-  const size_t msg2_size             = faest_128f_agg_msg2_size();
-  const size_t msg3_size             = faest_128f_agg_msg3_size();
-  const size_t msg5_size             = faest_128f_agg_msg5_size();
-  const size_t sig_size              = faest_128f_aggregate_signature_size(signer_count);
+  const size_t signer_state_size     = faest_@PARAM_L@_agg_signer_state_size();
+  const size_t aggregator_state_size = faest_@PARAM_L@_agg_aggregator_state_size(signer_count);
+  const size_t msg1_size             = faest_@PARAM_L@_agg_msg1_size();
+  const size_t msg2_size             = faest_@PARAM_L@_agg_msg2_size();
+  const size_t msg3_size             = faest_@PARAM_L@_agg_msg3_size();
+  const size_t msg5_size             = faest_@PARAM_L@_agg_msg5_size();
+  const size_t sig_size              = faest_@PARAM_L@_aggregate_signature_size(signer_count);
   CHECK(sig_size > 0);
 
   for (size_t j = 0; j < signer_count; ++j) {
-    pks[j]            = (uint8_t*)malloc(FAEST_128F_PUBLIC_KEY_SIZE);
-    sks[j]            = (uint8_t*)malloc(FAEST_128F_PRIVATE_KEY_SIZE);
+    pks[j]            = (uint8_t*)malloc(FAEST_@PARAM@_PUBLIC_KEY_SIZE);
+    sks[j]            = (uint8_t*)malloc(FAEST_@PARAM@_PRIVATE_KEY_SIZE);
     signer_states[j]  = calloc(1, signer_state_size);
     msg1s_buf[j]      = (uint8_t*)malloc(msg1_size);
     msg2s_buf[j]      = (uint8_t*)malloc(msg2_size);
@@ -56,7 +56,7 @@ static int run_aggregate_test(size_t signer_count) {
     msg5s_buf[j]      = (uint8_t*)malloc(msg5_size);
     CHECK(pks[j] && sks[j] && signer_states[j] && msg1s_buf[j] && msg2s_buf[j] && msg3s_buf[j] &&
           msg5s_buf[j]);
-    CHECK(faest_128f_keygen(pks[j], sks[j]) == 0);
+    CHECK(faest_@PARAM_L@_keygen(pks[j], sks[j]) == 0);
     pk_ptrs[j] = pks[j];
     msg1s[j]   = msg1s_buf[j];
     msg2s[j]   = msg2s_buf[j];
@@ -71,79 +71,111 @@ static int run_aggregate_test(size_t signer_count) {
   const uint8_t msg[] = "the quick brown fox jumps over the lazy dog";
   const size_t msg_len = sizeof(msg) - 1;
 
-  uint8_t chall_1[5 * 16 + 8];
-  uint8_t chall_2[3 * 16 + 8];
-  uint8_t chall_3[16];
+  uint8_t chall_1[5 * (@LAMBDA@/8) + 8];
+  uint8_t chall_2[3 * (@LAMBDA@/8) + 8];
+  uint8_t chall_3[(@LAMBDA@/8)];
   uint32_t ctr = 0;
 
   for (size_t j = 0; j < signer_count; ++j) {
-    CHECK(faest_128f_agg_signer_init(signer_states[j], sks[j], j, signer_count) == 0);
+    CHECK(faest_@PARAM_L@_agg_signer_init(signer_states[j], sks[j], j, signer_count) == 0);
   }
-  CHECK(faest_128f_agg_aggregator_init(aggregator_state, pk_ptrs, signer_count, msg, msg_len) ==
+  CHECK(faest_@PARAM_L@_agg_aggregator_init(aggregator_state, pk_ptrs, signer_count, msg, msg_len) ==
         0);
 
   // Round 1
   for (size_t j = 0; j < signer_count; ++j) {
-    CHECK(faest_128f_agg_signer_round1(signer_states[j], msg1s_buf[j]) == 0);
+    CHECK(faest_@PARAM_L@_agg_signer_round1(signer_states[j], msg1s_buf[j]) == 0);
   }
-  CHECK(faest_128f_agg_aggregator_round1(aggregator_state, msg1s, chall_1) == 0);
+  CHECK(faest_@PARAM_L@_agg_aggregator_round1(aggregator_state, msg1s, chall_1) == 0);
 
   // Round 2
   for (size_t j = 0; j < signer_count; ++j) {
-    CHECK(faest_128f_agg_signer_round2(signer_states[j], chall_1, msg, msg_len, msg2s_buf[j]) ==
+    CHECK(faest_@PARAM_L@_agg_signer_round2(signer_states[j], chall_1, msg, msg_len, msg2s_buf[j]) ==
           0);
   }
-  CHECK(faest_128f_agg_aggregator_round2(aggregator_state, msg2s, chall_2) == 0);
+  CHECK(faest_@PARAM_L@_agg_aggregator_round2(aggregator_state, msg2s, chall_2) == 0);
 
   // Round 3
   for (size_t j = 0; j < signer_count; ++j) {
-    CHECK(faest_128f_agg_signer_round3(signer_states[j], chall_2, msg3s_buf[j]) == 0);
+    CHECK(faest_@PARAM_L@_agg_signer_round3(signer_states[j], chall_2, msg3s_buf[j]) == 0);
   }
-  CHECK(faest_128f_agg_aggregator_round3(aggregator_state, msg3s) == 0);
+  CHECK(faest_@PARAM_L@_agg_aggregator_round3(aggregator_state, msg3s) == 0);
 
   // Round 4 (aggregator-only grinding)
-  CHECK(faest_128f_agg_aggregator_round4(aggregator_state, chall_3, &ctr) == 0);
+  CHECK(faest_@PARAM_L@_agg_aggregator_round4(aggregator_state, chall_3, &ctr) == 0);
 
   // Round 5
   for (size_t j = 0; j < signer_count; ++j) {
-    CHECK(faest_128f_agg_signer_round5(signer_states[j], chall_3, msg5s_buf[j]) == 0);
+    CHECK(faest_@PARAM_L@_agg_signer_round5(signer_states[j], chall_3, msg5s_buf[j]) == 0);
   }
   size_t sig_len = sig_size;
-  CHECK(faest_128f_agg_aggregator_finalize(aggregator_state, msg5s, signature, &sig_len) == 0);
+  CHECK(faest_@PARAM_L@_agg_aggregator_finalize(aggregator_state, msg5s, signature, &sig_len) == 0);
   CHECK(sig_len == sig_size);
 
   // Positive verify.
-  CHECK(faest_128f_aggregate_verify(pk_ptrs, signer_count, msg, msg_len, signature, sig_len) ==
+  CHECK(faest_@PARAM_L@_aggregate_verify(pk_ptrs, signer_count, msg, msg_len, signature, sig_len) ==
         0);
 
   // Negative: tampered message rejected.
   uint8_t tampered[sizeof(msg)];
   memcpy(tampered, msg, msg_len);
   tampered[0] ^= 1;
-  CHECK(faest_128f_aggregate_verify(pk_ptrs, signer_count, tampered, msg_len, signature, sig_len) !=
+  CHECK(faest_@PARAM_L@_aggregate_verify(pk_ptrs, signer_count, tampered, msg_len, signature, sig_len) !=
         0);
 
   // Negative: substitute one public key rejected.
   if (signer_count > 0) {
-    uint8_t other_pk[FAEST_128F_PUBLIC_KEY_SIZE];
-    uint8_t other_sk[FAEST_128F_PRIVATE_KEY_SIZE];
-    CHECK(faest_128f_keygen(other_pk, other_sk) == 0);
+    uint8_t other_pk[FAEST_@PARAM@_PUBLIC_KEY_SIZE];
+    uint8_t other_sk[FAEST_@PARAM@_PRIVATE_KEY_SIZE];
+    CHECK(faest_@PARAM_L@_keygen(other_pk, other_sk) == 0);
     const uint8_t** sub_pks = (const uint8_t**)calloc(signer_count, sizeof(uint8_t*));
     CHECK(sub_pks);
     for (size_t j = 0; j < signer_count; ++j) {
       sub_pks[j] = pk_ptrs[j];
     }
     sub_pks[0] = other_pk;
-    CHECK(faest_128f_aggregate_verify(sub_pks, signer_count, msg, msg_len, signature, sig_len) !=
+    CHECK(faest_@PARAM_L@_aggregate_verify(sub_pks, signer_count, msg, msg_len, signature, sig_len) !=
           0);
     free((void*)sub_pks);
   }
+
+  // Negative: swap signer order (n >= 2) — the verifier binds the ordered
+  // public-key list into chall_1, so any reordering breaks verification.
+  if (signer_count >= 2) {
+    const uint8_t** swapped = (const uint8_t**)calloc(signer_count, sizeof(uint8_t*));
+    CHECK(swapped);
+    for (size_t j = 0; j < signer_count; ++j) {
+      swapped[j] = pk_ptrs[j];
+    }
+    const uint8_t* tmp_p = swapped[0];
+    swapped[0]           = swapped[1];
+    swapped[1]           = tmp_p;
+    CHECK(faest_@PARAM_L@_aggregate_verify(swapped, signer_count, msg, msg_len, signature,
+                                           sig_len) != 0);
+    free((void*)swapped);
+  }
+
+  // Negative: corrupt the last 16 bytes of the signature (inside the
+  // trailing per-signer pdecom block). Verification must fail.
+  {
+    uint8_t* sig_copy = (uint8_t*)malloc(sig_len);
+    CHECK(sig_copy);
+    memcpy(sig_copy, signature, sig_len);
+    sig_copy[sig_len - 16] ^= 0xff;
+    CHECK(faest_@PARAM_L@_aggregate_verify(pk_ptrs, signer_count, msg, msg_len, sig_copy,
+                                           sig_len) != 0);
+    free(sig_copy);
+  }
+
+  // Negative: truncated signature rejected (length check).
+  CHECK(faest_@PARAM_L@_aggregate_verify(pk_ptrs, signer_count, msg, msg_len, signature,
+                                         sig_len - 1) != 0);
 
   printf("Aggregate (n=%zu) PASSED\n", signer_count);
 
   // Cleanup
   for (size_t j = 0; j < signer_count; ++j) {
-    faest_128f_agg_signer_clear(signer_states[j]);
+    faest_@PARAM_L@_agg_signer_clear(signer_states[j]);
     free(signer_states[j]);
     free(pks[j]);
     free(sks[j]);
@@ -152,7 +184,7 @@ static int run_aggregate_test(size_t signer_count) {
     free(msg3s_buf[j]);
     free(msg5s_buf[j]);
   }
-  faest_128f_agg_aggregator_clear(aggregator_state);
+  faest_@PARAM_L@_agg_aggregator_clear(aggregator_state);
   free(aggregator_state);
   free(signature);
   free(pks); free(sks); free(pk_ptrs);

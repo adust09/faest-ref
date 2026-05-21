@@ -1,20 +1,28 @@
 boost_test = dependency('boost', required: false, modules: ['unit_test_framework'])
 ntl = cc.find_library('ntl', required: false, has_headers: ['NTL/version.h'])
 
-# Aggregate signature smoke test (Phase 2B, n=1, faest_128f).
-# Uses the per-paramset wrappers; no Boost required.
-aggregate_smoke = executable(
-  'aggregate_smoke_test',
-  files('aggregate_smoke_test.c'),
-  dependencies: [libfaest_128f_dependency],
-  include_directories: include_directories,
-  c_args: defines + c_flags,
-)
-test(
-  'AggregateSmokeN1',
-  aggregate_smoke,
-  timeout: 120,
-)
+# Aggregate signature smoke tests, one executable per parameter set.
+# Each runs the full 5-round protocol at n=1 and n=3 plus tamper + pk-
+# substitution negative checks. No Boost dependency.
+foreach parameter_set : parameter_sets
+  smoke_src = configure_file(
+    input: 'aggregate_smoke_test.c.in',
+    output: 'aggregate_smoke_test_@0@.c'.format(parameter_set.get('PARAM_L')),
+    configuration: parameter_set,
+  )
+  smoke_exe = executable(
+    'aggregate_smoke_test_@0@'.format(parameter_set.get('PARAM_L')),
+    smoke_src,
+    dependencies: [get_variable('libfaest_@0@_dependency'.format(parameter_set.get('PARAM_L')))],
+    include_directories: include_directories,
+    c_args: defines + c_flags,
+  )
+  test(
+    'AggregateSmoke_@0@'.format(parameter_set.get('PARAM_L')),
+    smoke_exe,
+    timeout: 600,
+  )
+endforeach
 
 if boost_test.found()
   test_sources = files(
