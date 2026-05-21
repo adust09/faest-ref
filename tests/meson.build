@@ -1,6 +1,21 @@
 boost_test = dependency('boost', required: false, modules: ['unit_test_framework'])
 ntl = cc.find_library('ntl', required: false, has_headers: ['NTL/version.h'])
 
+# Aggregate signature smoke test (Phase 2B, n=1, faest_128f).
+# Uses the per-paramset wrappers; no Boost required.
+aggregate_smoke = executable(
+  'aggregate_smoke_test',
+  files('aggregate_smoke_test.c'),
+  dependencies: [libfaest_128f_dependency],
+  include_directories: include_directories,
+  c_args: defines + c_flags,
+)
+test(
+  'AggregateSmokeN1',
+  aggregate_smoke,
+  timeout: 120,
+)
+
 if boost_test.found()
   test_sources = files(
     'aes.cpp',

@@ -12,6 +12,7 @@
 #include "aes.h"
 #include "bavc.h"
 #include "compat.h"
+#include "faest_aes.h"
 #include "randomness.h"
 #include "random_oracle.h"
 #include "utils.h"
@@ -20,6 +21,22 @@
 
 #include <stdlib.h>
 #include <string.h>
+
+static inline void aes_prove_dispatch(uint8_t* a0, uint8_t* a1, uint8_t* a2, const uint8_t* w,
+                                      const uint8_t* u, uint8_t** V, const uint8_t* owf_in,
+                                      const uint8_t* owf_out, const uint8_t* chall_2,
+                                      const faest_paramset_t* params) {
+  switch (params->lambda) {
+  case 256:
+    aes_256_prover(a0, a1, a2, w, u, V, owf_in, owf_out, chall_2, params);
+    break;
+  case 192:
+    aes_192_prover(a0, a1, a2, w, u, V, owf_in, owf_out, chall_2, params);
+    break;
+  default:
+    aes_128_prover(a0, a1, a2, w, u, V, owf_in, owf_out, chall_2, params);
+  }
+}
 
 // Internal state. Inline-sized fields use MAX_LAMBDA bounds; large per-VOLE
 // buffers (witness, u, V) are heap-allocated in round1 and freed in clear.
@@ -190,25 +207,50 @@ int faest_agg_signer_round2(faest_agg_signer_state_t* state, const uint8_t* chal
   return 0;
 }
 
-// R3: chall_2-weighted polynomial coefficients. Phase 2A stub: real
-// implementation in Phase 2B (n=1 closure).
+// R3: chall_2-weighted polynomial coefficients via aes_<λ>_prover.
 int faest_agg_signer_round3(faest_agg_signer_state_t* state, const uint8_t* chall_2,
                             uint8_t* msg3_out, const faest_paramset_t* params) {
-  (void)chall_2; (void)msg3_out;
-  if (!state || !params || state->round_state != 2) {
+  if (!state || !chall_2 || !msg3_out || !params || state->round_state != 2) {
     return -1;
   }
-  return -1;
+  const unsigned int lambda       = params->lambda;
+  const unsigned int lambda_bytes = lambda / 8;
+
+  memcpy(state->chall_2, chall_2, 3 * lambda_bytes + 8);
+
+  faest_agg_sizes_t sizes;
+  if (!faest_agg_compute_sizes(&sizes, params)) {
+    return -1;
+  }
+
+  uint8_t* a0_out = msg3_out;
+  uint8_t* a1_out = msg3_out + lambda_bytes;
+  uint8_t* a2_out = msg3_out + 2 * lambda_bytes;
+  aes_prove_dispatch(a0_out, a1_out, a2_out, state->witness, state->u + sizes.ell_bytes, state->V,
+                     state->owf_input, state->owf_output, chall_2, params);
+
+  state->round_state = 3;
+  return 0;
 }
 
-// R5: pdecom_j. Phase 2A stub.
+// R5: decode chall_3, run bavc_open against this signer's subtree.
 int faest_agg_signer_round5(faest_agg_signer_state_t* state, const uint8_t* chall_3,
                             uint8_t* msg5_out, const faest_paramset_t* params) {
-  (void)chall_3; (void)msg5_out;
-  if (!state || !params || state->round_state != 3) {
+  if (!state || !chall_3 || !msg5_out || !params || state->round_state != 3) {
     return -1;
   }
-  return -1;
+  const unsigned int lambda_bytes = params->lambda / 8;
+  memcpy(state->chall_3, chall_3, lambda_bytes);
+
+  uint16_t decoded[MAX_TAU];
+  if (!decode_all_chall_3(decoded, chall_3, params)) {
+    return -1;
+  }
+  if (!bavc_open(msg5_out, &state->bavc, decoded, params)) {
+    return -1;
+  }
+  state->round_state = 5;
+  return 0;
 }
 
 void faest_agg_signer_clear(faest_agg_signer_state_t* state, const faest_paramset_t* params) {
