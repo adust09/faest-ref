@@ -92,4 +92,33 @@ if get_option('catch2').enabled() and get_option('benchmarks').enabled()
     cpp_args: defines + cpp_flags,
     link_args: linker_flags
   )
+
+  bench_aggregate_sources = files(
+    join_paths(meson.project_source_root(), 'tools', 'bench_aggregate.cpp'),
+  )
+  bench_aggregate_exe = executable('faest_128s_bench_aggregate', bench_aggregate_sources,
+    dependencies: [libfaest_128s_dependency, catch2],
+    include_directories: include_directories,
+    c_args: defines + c_flags,
+    cpp_args: defines + cpp_flags,
+    link_args: linker_flags
+  )
+
+  if valgrind_exec.found()
+    foreach n_val : ['1', '10', '100', '1000']
+      foreach mode_val : ['agg', 'seq']
+        custom_target('bench_aggregate_memory_usage_' + mode_val + '_n' + n_val,
+          command: [valgrind_exec, '-q', '--error-exitcode=1', '--tool=massif', '--stacks=yes',
+                    '--massif-out-file=@OUTPUT@',
+                    '--', bench_aggregate_exe],
+          env: ['BENCH_MEMORY_MODE=' + mode_val, 'BENCH_MEMORY_N=' + n_val],
+          output: 'bench_aggregate_' + mode_val + '_n' + n_val + '.massif',
+          depends: [bench_aggregate_exe],
+          install: false,
+          build_always_stale: true,
+          build_by_default: false,
+        )
+      endforeach
+    endforeach
+  endif
 endif
