@@ -739,14 +739,24 @@ int faest_aggregate_verify(const uint8_t* msg, size_t msg_len, const uint8_t* si
     }
   }
 
-  // Per-signer VOLE reconstruction.
-  for (size_t j = 0; j < signer_count; ++j) {
-    uint8_t iv_j[IV_SIZE];
-    hash_iv(iv_j, faest_agg_sig_iv_pre_const(sig, &layout, j), lambda);
+  // Per-signer VOLE reconstruction. Each iteration writes only to its own
+  // per_signer_hcom[j] / q_all[j], so the iterations are independent. We
+  // can't goto from inside a parallel region, so collect failures via an
+  // OR-reduced flag and branch to cleanup after the loop.
+  {
+    int vole_fail = 0;
+#pragma omp parallel for schedule(static) reduction(|:vole_fail)
+    for (size_t j = 0; j < signer_count; ++j) {
+      uint8_t iv_j[IV_SIZE];
+      hash_iv(iv_j, faest_agg_sig_iv_pre_const(sig, &layout, j), lambda);
 
-    if (!vole_reconstruct(per_signer_hcom[j], q_all[j], iv_j, sig_chall_3,
-                          faest_agg_sig_pdecom_const(sig, &layout, j),
-                          faest_agg_sig_c_const(sig, &layout, j), ell_hat, params)) {
+      if (!vole_reconstruct(per_signer_hcom[j], q_all[j], iv_j, sig_chall_3,
+                            faest_agg_sig_pdecom_const(sig, &layout, j),
+                            faest_agg_sig_c_const(sig, &layout, j), ell_hat, params)) {
+        vole_fail = 1;
+      }
+    }
+    if (vole_fail) {
       goto cleanup;
     }
   }
@@ -772,13 +782,24 @@ int faest_aggregate_verify(const uint8_t* msg, size_t msg_len, const uint8_t* si
   H2_update(&chall_2_ctx, chall_1, 5 * lambda_bytes + 8);
   H2_update(&chall_2_ctx, u_tilde_agg, u_tilde_bytes);
   {
+    // The outer i-loop is serial because H2_update feeds the hash state in a
+    // fixed order. The inner j-loop is an XOR-reduction over independent
+    // vole_hash calls — parallelize it with per-thread accumulators.
     uint8_t v_tilde_agg[MAX_LAMBDA_BYTES + UNIVERSAL_HASH_B];
-    uint8_t partial[MAX_LAMBDA_BYTES + UNIVERSAL_HASH_B];
     for (unsigned int i = 0; i < lambda; ++i) {
       memset(v_tilde_agg, 0, u_tilde_bytes);
-      for (size_t j = 0; j < signer_count; ++j) {
-        vole_hash(partial, chall_1, q_all[j][i], ell, lambda);
-        xor_u8_array(v_tilde_agg, partial, v_tilde_agg, u_tilde_bytes);
+#pragma omp parallel
+      {
+        uint8_t local[MAX_LAMBDA_BYTES + UNIVERSAL_HASH_B];
+        uint8_t partial[MAX_LAMBDA_BYTES + UNIVERSAL_HASH_B];
+        memset(local, 0, u_tilde_bytes);
+#pragma omp for schedule(static) nowait
+        for (size_t j = 0; j < signer_count; ++j) {
+          vole_hash(partial, chall_1, q_all[j][i], ell, lambda);
+          xor_u8_array(local, partial, local, u_tilde_bytes);
+        }
+#pragma omp critical
+        xor_u8_array(v_tilde_agg, local, v_tilde_agg, u_tilde_bytes);
       }
       if (ptr_get_bit(sig_chall_3, i)) {
         xor_u8_array(v_tilde_agg, u_tilde_agg, v_tilde_agg, u_tilde_bytes);
@@ -798,11 +819,20 @@ int faest_aggregate_verify(const uint8_t* msg, size_t msg_len, const uint8_t* si
   uint8_t zero_a2[MAX_LAMBDA_BYTES] = {0};
   uint8_t sum_q_tilde[MAX_LAMBDA_BYTES] = {0};
 
-  for (size_t j = 0; j < signer_count; ++j) {
-    uint8_t partial[MAX_LAMBDA_BYTES];
-    aes_verify(partial, faest_agg_sig_d_const(sig, &layout, j), q_all[j], chall_2, sig_chall_3,
-               zero_a1, zero_a2, owf_inputs[j], owf_outputs[j], params);
-    xor_u8_array(sum_q_tilde, partial, sum_q_tilde, lambda_bytes);
+  // aes_verify is independent per j; XOR-reduce its outputs into sum_q_tilde
+  // via per-thread accumulators, then merge under a critical section.
+#pragma omp parallel
+  {
+    uint8_t local_sum[MAX_LAMBDA_BYTES] = {0};
+#pragma omp for schedule(static) nowait
+    for (size_t j = 0; j < signer_count; ++j) {
+      uint8_t partial[MAX_LAMBDA_BYTES];
+      aes_verify(partial, faest_agg_sig_d_const(sig, &layout, j), q_all[j], chall_2, sig_chall_3,
+                 zero_a1, zero_a2, owf_inputs[j], owf_outputs[j], params);
+      xor_u8_array(local_sum, partial, local_sum, lambda_bytes);
+    }
+#pragma omp critical
+    xor_u8_array(sum_q_tilde, local_sum, sum_q_tilde, lambda_bytes);
   }
 
   // a0_hat = sum_q_tilde + δ·ã_1 + δ²·ã_2

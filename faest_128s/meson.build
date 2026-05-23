@@ -96,8 +96,12 @@ if get_option('catch2').enabled() and get_option('benchmarks').enabled()
   bench_aggregate_sources = files(
     join_paths(meson.project_source_root(), 'tools', 'bench_aggregate.cpp'),
   )
+  bench_aggregate_deps = [libfaest_128s_dependency, catch2]
+  if openmp.found()
+    bench_aggregate_deps += [openmp]
+  endif
   bench_aggregate_exe = executable('faest_128s_bench_aggregate', bench_aggregate_sources,
-    dependencies: [libfaest_128s_dependency, catch2],
+    dependencies: bench_aggregate_deps,
     include_directories: include_directories,
     c_args: defines + c_flags,
     cpp_args: defines + cpp_flags,
