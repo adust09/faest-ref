@@ -20,6 +20,7 @@ extern "C" {
 
 #include <catch_amalgamated.hpp>
 
+#include <atomic>
 #include <cstdlib>
 #include <cstdio>
 #include <cstring>
@@ -128,43 +129,64 @@ struct AggSetup {
 
   // Full 5-round sign producing this->signature. Re-initializes all state
   // each call so it can be invoked repeatedly inside a BENCHMARK.
+  //
+  // The four signer-side j-loops below are independent across j (each signer
+  // owns its own state / msg buffer) and are parallelized with OpenMP. The
+  // aggregator steps in between remain serial — they are a single-party
+  // hash/challenge derivation and not a per-signer workload.
   int sign_once() {
-    for (size_t j = 0; j < signer_count; ++j) {
+    std::atomic<int> err{0};
+    const size_t n = signer_count;
+
+#pragma omp parallel for schedule(static)
+    for (size_t j = 0; j < n; ++j) {
       faest_128s_agg_signer_clear(signer_states[j]);
-      if (faest_128s_agg_signer_init(signer_states[j], sks[j].data(), j, signer_count) != 0)
-        return -1;
+      if (faest_128s_agg_signer_init(signer_states[j], sks[j].data(), j, n) != 0)
+        err.store(-1, std::memory_order_relaxed);
     }
+    if (err.load(std::memory_order_relaxed) != 0) return -1;
+
     faest_128s_agg_aggregator_clear(aggregator_state);
-    if (faest_128s_agg_aggregator_init(aggregator_state, pk_ptrs.data(), signer_count,
+    if (faest_128s_agg_aggregator_init(aggregator_state, pk_ptrs.data(), n,
                                        message.data(), message.size()) != 0)
       return -1;
 
-    for (size_t j = 0; j < signer_count; ++j) {
-      if (faest_128s_agg_signer_round1(signer_states[j], msg1_buf[j].data()) != 0) return -1;
+#pragma omp parallel for schedule(static)
+    for (size_t j = 0; j < n; ++j) {
+      if (faest_128s_agg_signer_round1(signer_states[j], msg1_buf[j].data()) != 0)
+        err.store(-1, std::memory_order_relaxed);
     }
+    if (err.load(std::memory_order_relaxed) != 0) return -1;
     if (faest_128s_agg_aggregator_round1(aggregator_state, msg1_ptrs.data(), chall_1) != 0)
       return -1;
 
-    for (size_t j = 0; j < signer_count; ++j) {
+#pragma omp parallel for schedule(static)
+    for (size_t j = 0; j < n; ++j) {
       if (faest_128s_agg_signer_round2(signer_states[j], chall_1, message.data(), message.size(),
                                        msg2_buf[j].data()) != 0)
-        return -1;
+        err.store(-1, std::memory_order_relaxed);
     }
+    if (err.load(std::memory_order_relaxed) != 0) return -1;
     if (faest_128s_agg_aggregator_round2(aggregator_state, msg2_ptrs.data(), chall_2) != 0)
       return -1;
 
-    for (size_t j = 0; j < signer_count; ++j) {
+#pragma omp parallel for schedule(static)
+    for (size_t j = 0; j < n; ++j) {
       if (faest_128s_agg_signer_round3(signer_states[j], chall_2, msg3_buf[j].data()) != 0)
-        return -1;
+        err.store(-1, std::memory_order_relaxed);
     }
+    if (err.load(std::memory_order_relaxed) != 0) return -1;
     if (faest_128s_agg_aggregator_round3(aggregator_state, msg3_ptrs.data()) != 0) return -1;
 
     if (faest_128s_agg_aggregator_round4(aggregator_state, chall_3, &ctr) != 0) return -1;
 
-    for (size_t j = 0; j < signer_count; ++j) {
+#pragma omp parallel for schedule(static)
+    for (size_t j = 0; j < n; ++j) {
       if (faest_128s_agg_signer_round5(signer_states[j], chall_3, msg5_buf[j].data()) != 0)
-        return -1;
+        err.store(-1, std::memory_order_relaxed);
     }
+    if (err.load(std::memory_order_relaxed) != 0) return -1;
+
     size_t sig_len = sig_size;
     if (faest_128s_agg_aggregator_finalize(aggregator_state, msg5_ptrs.data(), signature.data(),
                                            &sig_len) != 0)
@@ -201,23 +223,33 @@ struct SeqSetup {
                    reinterpret_cast<const uint8_t*>(kBenchMessage) + std::strlen(kBenchMessage));
   }
 
+  // The N signers in the sequential baseline are wholly independent — each
+  // produces its own signature with no shared state. Parallelize over j so
+  // the comparison against the aggregate path is apples-to-apples on the
+  // same hardware.
   int sign_all() {
-    for (size_t j = 0; j < signer_count; ++j) {
+    std::atomic<int> err{0};
+    const size_t n = signer_count;
+#pragma omp parallel for schedule(static)
+    for (size_t j = 0; j < n; ++j) {
       sig_lens[j] = FAEST_128S_SIGNATURE_SIZE;
       if (faest_128s_sign(sks[j].data(), message.data(), message.size(), sigs[j].data(),
                           &sig_lens[j]) != 0)
-        return -1;
+        err.store(-1, std::memory_order_relaxed);
     }
-    return 0;
+    return err.load(std::memory_order_relaxed);
   }
 
   int verify_all() const {
-    for (size_t j = 0; j < signer_count; ++j) {
+    std::atomic<int> err{0};
+    const size_t n = signer_count;
+#pragma omp parallel for schedule(static)
+    for (size_t j = 0; j < n; ++j) {
       if (faest_128s_verify(pks[j].data(), message.data(), message.size(), sigs[j].data(),
                             sig_lens[j]) != 0)
-        return -1;
+        err.store(-1, std::memory_order_relaxed);
     }
-    return 0;
+    return err.load(std::memory_order_relaxed);
   }
 };
 
