@@ -9,6 +9,9 @@
 #include "faest_@PARAM_L@.h"
 #include "aes.h"
 #include "compat.h"
+#include "faest_agg_aggregator.h"
+#include "faest_agg_layout.h"
+#include "faest_agg_signer.h"
 #include "faest_impl.h"
 #include "instances.h"
 #include "owf.h"
@@ -152,6 +155,220 @@ void FAEST_CALLING_CONVENTION faest_@PARAM_L@_clear_private_key(uint8_t* key) {
 
 void FAEST_CALLING_CONVENTION faest_@PARAM_L@_clear_unpacked_private_key(faest_@PARAM_L@_unpacked_private_key_t* key) {
   faest_explicit_bzero(key, sizeof(*key));
+}
+
+/* === 5-round aggregate signature wrappers === */
+
+size_t FAEST_CALLING_CONVENTION faest_@PARAM_L@_aggregate_signature_size(size_t signer_count) {
+  const faest_paramset_t* params = faest_get_paramset(FAEST_@PARAM@);
+  return faest_aggregate_signature_size(signer_count, params);
+}
+
+size_t FAEST_CALLING_CONVENTION faest_@PARAM_L@_agg_signer_state_size(void) {
+  const faest_paramset_t* params = faest_get_paramset(FAEST_@PARAM@);
+  return faest_agg_signer_state_size(params);
+}
+
+size_t FAEST_CALLING_CONVENTION faest_@PARAM_L@_agg_msg1_size(void) {
+  faest_agg_sizes_t sizes;
+  const faest_paramset_t* params = faest_get_paramset(FAEST_@PARAM@);
+  if (!faest_agg_compute_sizes(&sizes, params)) {
+    return 0;
+  }
+  return sizes.msg1_bytes;
+}
+
+size_t FAEST_CALLING_CONVENTION faest_@PARAM_L@_agg_msg2_size(void) {
+  faest_agg_sizes_t sizes;
+  const faest_paramset_t* params = faest_get_paramset(FAEST_@PARAM@);
+  if (!faest_agg_compute_sizes(&sizes, params)) {
+    return 0;
+  }
+  return sizes.msg2_bytes;
+}
+
+size_t FAEST_CALLING_CONVENTION faest_@PARAM_L@_agg_msg3_size(void) {
+  faest_agg_sizes_t sizes;
+  const faest_paramset_t* params = faest_get_paramset(FAEST_@PARAM@);
+  if (!faest_agg_compute_sizes(&sizes, params)) {
+    return 0;
+  }
+  return sizes.msg3_bytes;
+}
+
+size_t FAEST_CALLING_CONVENTION faest_@PARAM_L@_agg_msg5_size(void) {
+  faest_agg_sizes_t sizes;
+  const faest_paramset_t* params = faest_get_paramset(FAEST_@PARAM@);
+  if (!faest_agg_compute_sizes(&sizes, params)) {
+    return 0;
+  }
+  return sizes.msg5_bytes;
+}
+
+int FAEST_CALLING_CONVENTION faest_@PARAM_L@_agg_signer_init(void* state, const uint8_t* sk,
+                                                             size_t signer_index,
+                                                             size_t signer_count) {
+  if (!state || !sk) {
+    return -1;
+  }
+  const faest_paramset_t* params = faest_get_paramset(FAEST_@PARAM@);
+  /* The signer requires the OWF input, output, and key derived from sk. */
+  uint8_t owf_output[@OWF_OUTPUT_SIZE@];
+  faest_@PARAM_L@_owf(SK_KEY(sk), SK_INPUT(sk), owf_output);
+  return faest_agg_signer_init((faest_agg_signer_state_t*)state, SK_KEY(sk), SK_INPUT(sk),
+                               owf_output, signer_index, signer_count, params);
+}
+
+int FAEST_CALLING_CONVENTION faest_@PARAM_L@_agg_signer_round1(void* state, uint8_t* msg1_out) {
+  const faest_paramset_t* params = faest_get_paramset(FAEST_@PARAM@);
+  return faest_agg_signer_round1((faest_agg_signer_state_t*)state, msg1_out, params);
+}
+
+int FAEST_CALLING_CONVENTION faest_@PARAM_L@_agg_signer_round2(void* state,
+                                                               const uint8_t* chall_1,
+                                                               const uint8_t* msg,
+                                                               size_t msg_len,
+                                                               uint8_t* msg2_out) {
+  const faest_paramset_t* params = faest_get_paramset(FAEST_@PARAM@);
+  return faest_agg_signer_round2((faest_agg_signer_state_t*)state, chall_1, msg, msg_len,
+                                 msg2_out, params);
+}
+
+int FAEST_CALLING_CONVENTION faest_@PARAM_L@_agg_signer_round3(void* state,
+                                                               const uint8_t* chall_2,
+                                                               uint8_t* msg3_out) {
+  const faest_paramset_t* params = faest_get_paramset(FAEST_@PARAM@);
+  return faest_agg_signer_round3((faest_agg_signer_state_t*)state, chall_2, msg3_out, params);
+}
+
+int FAEST_CALLING_CONVENTION faest_@PARAM_L@_agg_signer_round5(void* state,
+                                                               const uint8_t* chall_3,
+                                                               uint8_t* msg5_out) {
+  const faest_paramset_t* params = faest_get_paramset(FAEST_@PARAM@);
+  return faest_agg_signer_round5((faest_agg_signer_state_t*)state, chall_3, msg5_out, params);
+}
+
+void FAEST_CALLING_CONVENTION faest_@PARAM_L@_agg_signer_clear(void* state) {
+  const faest_paramset_t* params = faest_get_paramset(FAEST_@PARAM@);
+  faest_agg_signer_clear((faest_agg_signer_state_t*)state, params);
+}
+
+size_t FAEST_CALLING_CONVENTION faest_@PARAM_L@_agg_aggregator_state_size(size_t signer_count) {
+  const faest_paramset_t* params = faest_get_paramset(FAEST_@PARAM@);
+  return faest_agg_aggregator_state_size(signer_count, params);
+}
+
+int FAEST_CALLING_CONVENTION faest_@PARAM_L@_agg_aggregator_init(void* state,
+                                                                 const uint8_t* const* pks,
+                                                                 size_t signer_count,
+                                                                 const uint8_t* msg,
+                                                                 size_t msg_len) {
+  if (!pks) {
+    return -1;
+  }
+  const faest_paramset_t* params = faest_get_paramset(FAEST_@PARAM@);
+  /* Split per-signer public keys into (owf_input, owf_output) arrays. */
+  if (signer_count == 0) {
+    return -1;
+  }
+  const uint8_t** owf_inputs  = (const uint8_t**)malloc(signer_count * sizeof(uint8_t*));
+  const uint8_t** owf_outputs = (const uint8_t**)malloc(signer_count * sizeof(uint8_t*));
+  if (!owf_inputs || !owf_outputs) {
+    free((void*)owf_inputs);
+    free((void*)owf_outputs);
+    return -1;
+  }
+  for (size_t j = 0; j < signer_count; ++j) {
+    if (!pks[j]) {
+      free((void*)owf_inputs);
+      free((void*)owf_outputs);
+      return -1;
+    }
+    owf_inputs[j]  = PK_INPUT(pks[j]);
+    owf_outputs[j] = PK_OUTPUT(pks[j]);
+  }
+  int ret = faest_agg_aggregator_init((faest_agg_aggregator_state_t*)state, owf_inputs,
+                                      owf_outputs, signer_count, msg, msg_len, params);
+  free((void*)owf_inputs);
+  free((void*)owf_outputs);
+  return ret;
+}
+
+int FAEST_CALLING_CONVENTION faest_@PARAM_L@_agg_aggregator_round1(void* state,
+                                                                   const uint8_t* const* msg1s,
+                                                                   uint8_t* chall_1_out) {
+  const faest_paramset_t* params = faest_get_paramset(FAEST_@PARAM@);
+  return faest_agg_aggregator_round1((faest_agg_aggregator_state_t*)state, msg1s, chall_1_out,
+                                     params);
+}
+
+int FAEST_CALLING_CONVENTION faest_@PARAM_L@_agg_aggregator_round2(void* state,
+                                                                   const uint8_t* const* msg2s,
+                                                                   uint8_t* chall_2_out) {
+  const faest_paramset_t* params = faest_get_paramset(FAEST_@PARAM@);
+  return faest_agg_aggregator_round2((faest_agg_aggregator_state_t*)state, msg2s, chall_2_out,
+                                     params);
+}
+
+int FAEST_CALLING_CONVENTION faest_@PARAM_L@_agg_aggregator_round3(void* state,
+                                                                   const uint8_t* const* msg3s) {
+  const faest_paramset_t* params = faest_get_paramset(FAEST_@PARAM@);
+  return faest_agg_aggregator_round3((faest_agg_aggregator_state_t*)state, msg3s, params);
+}
+
+int FAEST_CALLING_CONVENTION faest_@PARAM_L@_agg_aggregator_round4(void* state,
+                                                                   uint8_t* chall_3_out,
+                                                                   uint32_t* ctr_out) {
+  const faest_paramset_t* params = faest_get_paramset(FAEST_@PARAM@);
+  return faest_agg_aggregator_round4((faest_agg_aggregator_state_t*)state, chall_3_out, ctr_out,
+                                     params);
+}
+
+int FAEST_CALLING_CONVENTION faest_@PARAM_L@_agg_aggregator_finalize(void* state,
+                                                                     const uint8_t* const* msg5s,
+                                                                     uint8_t* signature,
+                                                                     size_t* signature_len) {
+  const faest_paramset_t* params = faest_get_paramset(FAEST_@PARAM@);
+  return faest_agg_aggregator_finalize((faest_agg_aggregator_state_t*)state, msg5s, signature,
+                                       signature_len, params);
+}
+
+void FAEST_CALLING_CONVENTION faest_@PARAM_L@_agg_aggregator_clear(void* state) {
+  const faest_paramset_t* params = faest_get_paramset(FAEST_@PARAM@);
+  faest_agg_aggregator_clear((faest_agg_aggregator_state_t*)state, params);
+}
+
+int FAEST_CALLING_CONVENTION faest_@PARAM_L@_aggregate_verify(const uint8_t* const* pks,
+                                                              size_t signer_count,
+                                                              const uint8_t* message,
+                                                              size_t message_len,
+                                                              const uint8_t* signature,
+                                                              size_t signature_len) {
+  if (!pks || signer_count == 0) {
+    return -1;
+  }
+  const faest_paramset_t* params = faest_get_paramset(FAEST_@PARAM@);
+  const uint8_t** owf_inputs  = (const uint8_t**)malloc(signer_count * sizeof(uint8_t*));
+  const uint8_t** owf_outputs = (const uint8_t**)malloc(signer_count * sizeof(uint8_t*));
+  if (!owf_inputs || !owf_outputs) {
+    free((void*)owf_inputs);
+    free((void*)owf_outputs);
+    return -1;
+  }
+  for (size_t j = 0; j < signer_count; ++j) {
+    if (!pks[j]) {
+      free((void*)owf_inputs);
+      free((void*)owf_outputs);
+      return -1;
+    }
+    owf_inputs[j]  = PK_INPUT(pks[j]);
+    owf_outputs[j] = PK_OUTPUT(pks[j]);
+  }
+  int ret = faest_aggregate_verify(message, message_len, signature, signature_len, owf_inputs,
+                                   owf_outputs, signer_count, params);
+  free((void*)owf_inputs);
+  free((void*)owf_outputs);
+  return ret;
 }
 
 // vim: ft=c

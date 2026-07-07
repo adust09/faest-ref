@@ -8,7 +8,10 @@
 
 #include "faest_impl.h"
 #include "aes.h"
+#include "bavc_forest.h"
+#include "faest_agg_layout.h"
 #include "faest_aes.h"
+#include "fields.h"
 #include "randomness.h"
 #include "random_oracle.h"
 #include "utils.h"
@@ -525,4 +528,343 @@ int faest_verify(const uint8_t* msg, size_t msglen, const uint8_t* sig, const ui
 
   // Step 21
   return memcmp(chall_3, dsignature_chall_3(sig, params), lambda_bytes) == 0 ? 0 : -1;
+}
+
+// === Aggregate (5-round multi-signer) ===
+// Phase 1 stub. Round-by-round implementation lives in faest_agg_signer.c and
+// faest_agg_aggregator.c; this verifier consumes the finalized transcript.
+
+size_t faest_aggregate_signature_size(size_t signer_count, const faest_paramset_t* params) {
+  faest_agg_signature_layout_t layout;
+  if (!faest_agg_compute_signature_layout(&layout, signer_count, params)) {
+    return 0;
+  }
+  return layout.total_bytes;
+}
+
+// Recompute the aggregator's chall_1 derivation. Mirror of
+// hash_agg_chall_1 in faest_agg_aggregator.c.
+static void faest_agg_verify_hash_chall_1(uint8_t* chall_1, const uint8_t* mu,
+                                          const uint8_t* h_com, const uint8_t* sig,
+                                          const faest_agg_signature_layout_t* layout,
+                                          const faest_paramset_t* params) {
+  static const uint8_t domain[] = "FAEST-AGG-CHAL1-v1";
+  const unsigned int lambda       = params->lambda;
+  const unsigned int lambda_bytes = lambda / 8;
+
+  H2_context_t ctx;
+  H2_init(&ctx, lambda);
+  H2_update(&ctx, domain, sizeof(domain) - 1);
+  {
+    uint8_t n_le[8];
+    for (size_t i = 0; i < 8; ++i) {
+      n_le[i] = (uint8_t)((layout->signer_count >> (i * 8)) & 0xff);
+    }
+    H2_update(&ctx, n_le, sizeof(n_le));
+  }
+  H2_update(&ctx, mu, 2 * lambda_bytes);
+  H2_update(&ctx, h_com, lambda_bytes);
+  for (size_t j = 0; j < layout->signer_count; ++j) {
+    H2_update(&ctx, faest_agg_sig_iv_pre_const(sig, layout, j), lambda_bytes);
+  }
+  for (size_t j = 0; j < layout->signer_count; ++j) {
+    H2_update(&ctx, faest_agg_sig_c_const(sig, layout, j), layout->sizes.c_bytes);
+  }
+  H2_1_final(&ctx, chall_1, 5 * lambda_bytes + 8);
+}
+
+// Recompute the aggregator's mu derivation. Mirror of hash_agg_mu.
+static void faest_agg_verify_hash_mu(uint8_t* mu, const uint8_t* const* owf_inputs,
+                                     const uint8_t* const* owf_outputs, size_t signer_count,
+                                     const uint8_t* msg, size_t msglen,
+                                     const faest_paramset_t* params) {
+  static const uint8_t domain[] = "FAEST-AGG-MU-v1";
+  const unsigned int lambda = params->lambda;
+
+  H2_context_t ctx;
+  H2_init(&ctx, lambda);
+  H2_update(&ctx, domain, sizeof(domain) - 1);
+  {
+    uint8_t hdr[16];
+    hdr[0] = (uint8_t)(params->lambda & 0xff);
+    hdr[1] = (uint8_t)((params->lambda >> 8) & 0xff);
+    hdr[2] = params->tau;
+    hdr[3] = params->w_grind;
+    hdr[4] = params->owf_input_size;
+    hdr[5] = params->owf_output_size;
+    for (int i = 6; i < 16; ++i) hdr[i] = 0;
+    H2_update(&ctx, hdr, sizeof(hdr));
+  }
+  {
+    uint8_t n_le[8];
+    for (size_t i = 0; i < 8; ++i) {
+      n_le[i] = (uint8_t)((signer_count >> (i * 8)) & 0xff);
+    }
+    H2_update(&ctx, n_le, sizeof(n_le));
+  }
+  for (size_t j = 0; j < signer_count; ++j) {
+    H2_update(&ctx, owf_inputs[j], params->owf_input_size);
+    H2_update(&ctx, owf_outputs[j], params->owf_output_size);
+  }
+  {
+    uint8_t mlen_le[8];
+    for (size_t i = 0; i < 8; ++i) {
+      mlen_le[i] = (uint8_t)((msglen >> (i * 8)) & 0xff);
+    }
+    H2_update(&ctx, mlen_le, sizeof(mlen_le));
+  }
+  H2_update(&ctx, msg, msglen);
+  H2_0_final(&ctx, mu, 2 * (lambda / 8));
+}
+
+// Compute a0_hat = sum_q_tilde + δ·a1_agg + δ²·a2_agg over GF(2^λ),
+// where δ is loaded from chall_3.
+static void faest_agg_verify_combine_a0(uint8_t* a0_hat, const uint8_t* sum_q_tilde,
+                                        const uint8_t* a1_agg, const uint8_t* a2_agg,
+                                        const uint8_t* chall_3,
+                                        const faest_paramset_t* params) {
+  const unsigned int lambda_bytes = params->lambda / 8;
+  switch (params->lambda) {
+  case 256: {
+    bf256_t delta, delta_sq, a1, a2, sum, tmp;
+    bf256_load(&delta, chall_3);
+    bf256_mul(&delta_sq, &delta, &delta);
+    bf256_load(&a1, a1_agg);
+    bf256_load(&a2, a2_agg);
+    bf256_load(&sum, sum_q_tilde);
+    bf256_mul(&tmp, &delta, &a1);
+    bf256_add_inplace(&sum, &tmp);
+    bf256_mul(&tmp, &delta_sq, &a2);
+    bf256_add_inplace(&sum, &tmp);
+    bf256_store(a0_hat, &sum);
+    break;
+  }
+  case 192: {
+    bf192_t delta, delta_sq, a1, a2, sum, tmp;
+    bf192_load(&delta, chall_3);
+    bf192_mul(&delta_sq, &delta, &delta);
+    bf192_load(&a1, a1_agg);
+    bf192_load(&a2, a2_agg);
+    bf192_load(&sum, sum_q_tilde);
+    bf192_mul(&tmp, &delta, &a1);
+    bf192_add_inplace(&sum, &tmp);
+    bf192_mul(&tmp, &delta_sq, &a2);
+    bf192_add_inplace(&sum, &tmp);
+    bf192_store(a0_hat, &sum);
+    break;
+  }
+  default: {
+    bf128_t delta, delta_sq, a1, a2, sum, tmp;
+    bf128_load(&delta, chall_3);
+    bf128_mul(&delta_sq, &delta, &delta);
+    bf128_load(&a1, a1_agg);
+    bf128_load(&a2, a2_agg);
+    bf128_load(&sum, sum_q_tilde);
+    bf128_mul(&tmp, &delta, &a1);
+    bf128_add_inplace(&sum, &tmp);
+    bf128_mul(&tmp, &delta_sq, &a2);
+    bf128_add_inplace(&sum, &tmp);
+    bf128_store(a0_hat, &sum);
+    break;
+  }
+  }
+  (void)lambda_bytes;
+}
+
+int faest_aggregate_verify(const uint8_t* msg, size_t msg_len, const uint8_t* sig,
+                           size_t sig_len, const uint8_t* const* owf_inputs,
+                           const uint8_t* const* owf_outputs, size_t signer_count,
+                           const faest_paramset_t* params) {
+  if (!sig || !owf_inputs || !owf_outputs || !params || (!msg && msg_len) || signer_count == 0) {
+    return -1;
+  }
+
+  faest_agg_signature_layout_t layout;
+  if (!faest_agg_compute_signature_layout(&layout, signer_count, params) ||
+      sig_len != layout.total_bytes) {
+    return -1;
+  }
+  for (size_t j = 0; j < signer_count; ++j) {
+    if (!owf_inputs[j] || !owf_outputs[j]) {
+      return -1;
+    }
+  }
+
+  const unsigned int lambda       = params->lambda;
+  const unsigned int lambda_bytes = lambda / 8;
+  const unsigned int ell          = params->l;
+  const unsigned int ell_hat      = ell + 3 * lambda + UNIVERSAL_HASH_B_BITS;
+  const unsigned int ell_hat_bytes = ell_hat / 8;
+  const unsigned int u_tilde_bytes = lambda_bytes + UNIVERSAL_HASH_B;
+
+  const uint8_t* sig_chall_3 = faest_agg_sig_chall_3_const(sig, &layout);
+  if (!check_challenge_3(sig_chall_3, lambda - params->w_grind, lambda)) {
+    return -1;
+  }
+
+  uint8_t mu[MAX_LAMBDA_BYTES * 2];
+  faest_agg_verify_hash_mu(mu, owf_inputs, owf_outputs, signer_count, msg, msg_len, params);
+
+  int ret = -1;
+  uint8_t* per_signer_hcom_storage = NULL;
+  uint8_t** per_signer_hcom = NULL;
+  uint8_t** q_view = NULL;                 // [lambda] view into the current signer's Q
+  uint8_t*** q_all = NULL;                 // q_all[j][i] = row i of Q_j
+  uint8_t** q_row_storage = NULL;          // q_row_storage[j] = base of Q_j
+
+  // Allocate per-signer reconstructed h_com_j storage.
+  per_signer_hcom = (uint8_t**)calloc(signer_count, sizeof(uint8_t*));
+  per_signer_hcom_storage = (uint8_t*)calloc(signer_count, MAX_LAMBDA_BYTES * 2);
+  if (!per_signer_hcom || !per_signer_hcom_storage) {
+    goto cleanup;
+  }
+  for (size_t j = 0; j < signer_count; ++j) {
+    per_signer_hcom[j] = per_signer_hcom_storage + j * MAX_LAMBDA_BYTES * 2;
+  }
+
+  // Allocate per-signer Q_j matrices.
+  q_all          = (uint8_t***)calloc(signer_count, sizeof(uint8_t**));
+  q_row_storage  = (uint8_t**)calloc(signer_count, sizeof(uint8_t*));
+  if (!q_all || !q_row_storage) {
+    goto cleanup;
+  }
+  for (size_t j = 0; j < signer_count; ++j) {
+    q_all[j]         = (uint8_t**)malloc(lambda * sizeof(uint8_t*));
+    q_row_storage[j] = (uint8_t*)calloc(lambda, ell_hat_bytes);
+    if (!q_all[j] || !q_row_storage[j]) {
+      goto cleanup;
+    }
+    for (unsigned int i = 0; i < lambda; ++i) {
+      q_all[j][i] = q_row_storage[j] + i * ell_hat_bytes;
+    }
+  }
+
+  // Per-signer VOLE reconstruction. Each iteration writes only to its own
+  // per_signer_hcom[j] / q_all[j], so the iterations are independent. We
+  // can't goto from inside a parallel region, so collect failures via an
+  // OR-reduced flag and branch to cleanup after the loop.
+  {
+    int vole_fail = 0;
+#pragma omp parallel for schedule(static) reduction(|:vole_fail)
+    for (size_t j = 0; j < signer_count; ++j) {
+      uint8_t iv_j[IV_SIZE];
+      hash_iv(iv_j, faest_agg_sig_iv_pre_const(sig, &layout, j), lambda);
+
+      if (!vole_reconstruct(per_signer_hcom[j], q_all[j], iv_j, sig_chall_3,
+                            faest_agg_sig_pdecom_const(sig, &layout, j),
+                            faest_agg_sig_c_const(sig, &layout, j), ell_hat, params)) {
+        vole_fail = 1;
+      }
+    }
+    if (vole_fail) {
+      goto cleanup;
+    }
+  }
+
+  // Verify combined h_com.
+  uint8_t hcom_combined[MAX_LAMBDA_BYTES];
+  bavc_forest_combine_hcom(hcom_combined, (const uint8_t* const*)per_signer_hcom, signer_count,
+                           params);
+  if (memcmp(hcom_combined, faest_agg_sig_hcom_const(sig, &layout), lambda_bytes) != 0) {
+    goto cleanup;
+  }
+
+  // Recompute chall_1.
+  uint8_t chall_1[5 * MAX_LAMBDA_BYTES + 8];
+  faest_agg_verify_hash_chall_1(chall_1, mu, hcom_combined, sig, &layout, params);
+
+  // Recompute chall_2. V_tilde_agg[i] = (XOR_j vole_hash(chall_1, q_j[i], ell))
+  //                                     XOR (chall_3_bit_i · ũ_agg).
+  const uint8_t* u_tilde_agg = faest_agg_sig_u_tilde_agg_const(sig, &layout);
+
+  H2_context_t chall_2_ctx;
+  H2_init(&chall_2_ctx, lambda);
+  H2_update(&chall_2_ctx, chall_1, 5 * lambda_bytes + 8);
+  H2_update(&chall_2_ctx, u_tilde_agg, u_tilde_bytes);
+  {
+    // The outer i-loop is serial because H2_update feeds the hash state in a
+    // fixed order. The inner j-loop is an XOR-reduction over independent
+    // vole_hash calls — parallelize it with per-thread accumulators.
+    uint8_t v_tilde_agg[MAX_LAMBDA_BYTES + UNIVERSAL_HASH_B];
+    for (unsigned int i = 0; i < lambda; ++i) {
+      memset(v_tilde_agg, 0, u_tilde_bytes);
+#pragma omp parallel
+      {
+        uint8_t local[MAX_LAMBDA_BYTES + UNIVERSAL_HASH_B];
+        uint8_t partial[MAX_LAMBDA_BYTES + UNIVERSAL_HASH_B];
+        memset(local, 0, u_tilde_bytes);
+#pragma omp for schedule(static) nowait
+        for (size_t j = 0; j < signer_count; ++j) {
+          vole_hash(partial, chall_1, q_all[j][i], ell, lambda);
+          xor_u8_array(local, partial, local, u_tilde_bytes);
+        }
+#pragma omp critical
+        xor_u8_array(v_tilde_agg, local, v_tilde_agg, u_tilde_bytes);
+      }
+      if (ptr_get_bit(sig_chall_3, i)) {
+        xor_u8_array(v_tilde_agg, u_tilde_agg, v_tilde_agg, u_tilde_bytes);
+      }
+      H2_update(&chall_2_ctx, v_tilde_agg, u_tilde_bytes);
+    }
+  }
+  for (size_t j = 0; j < signer_count; ++j) {
+    H2_update(&chall_2_ctx, faest_agg_sig_d_const(sig, &layout, j), layout.sizes.ell_bytes);
+  }
+  uint8_t chall_2[3 * MAX_LAMBDA_BYTES + 8];
+  H2_2_final(&chall_2_ctx, chall_2, 3 * lambda_bytes + 8);
+
+  // Per-signer aes_<λ>_verifier with zero a1/a2 yields per-signer q_tilde_j;
+  // XOR-sum them.
+  uint8_t zero_a1[MAX_LAMBDA_BYTES] = {0};
+  uint8_t zero_a2[MAX_LAMBDA_BYTES] = {0};
+  uint8_t sum_q_tilde[MAX_LAMBDA_BYTES] = {0};
+
+  // aes_verify is independent per j; XOR-reduce its outputs into sum_q_tilde
+  // via per-thread accumulators, then merge under a critical section.
+#pragma omp parallel
+  {
+    uint8_t local_sum[MAX_LAMBDA_BYTES] = {0};
+#pragma omp for schedule(static) nowait
+    for (size_t j = 0; j < signer_count; ++j) {
+      uint8_t partial[MAX_LAMBDA_BYTES];
+      aes_verify(partial, faest_agg_sig_d_const(sig, &layout, j), q_all[j], chall_2, sig_chall_3,
+                 zero_a1, zero_a2, owf_inputs[j], owf_outputs[j], params);
+      xor_u8_array(local_sum, partial, local_sum, lambda_bytes);
+    }
+#pragma omp critical
+    xor_u8_array(sum_q_tilde, local_sum, sum_q_tilde, lambda_bytes);
+  }
+
+  // a0_hat = sum_q_tilde + δ·ã_1 + δ²·ã_2
+  uint8_t a0_hat[MAX_LAMBDA_BYTES];
+  faest_agg_verify_combine_a0(a0_hat, sum_q_tilde, faest_agg_sig_a1_const(sig, &layout),
+                              faest_agg_sig_a2_const(sig, &layout), sig_chall_3, params);
+
+  // Recompute chall_3.
+  uint8_t chall_3_check[MAX_LAMBDA_BYTES];
+  hash_challenge_3(chall_3_check, chall_2, a0_hat, faest_agg_sig_a1_const(sig, &layout),
+                   faest_agg_sig_a2_const(sig, &layout),
+                   faest_agg_sig_ctr_const(sig, &layout), lambda);
+
+  ret = memcmp(chall_3_check, sig_chall_3, lambda_bytes) == 0 ? 0 : -1;
+
+cleanup:
+  if (q_all) {
+    for (size_t j = 0; j < signer_count; ++j) {
+      if (q_all[j]) {
+        free(q_all[j]);
+      }
+    }
+    free(q_all);
+  }
+  if (q_row_storage) {
+    for (size_t j = 0; j < signer_count; ++j) {
+      free(q_row_storage[j]);
+    }
+    free(q_row_storage);
+  }
+  free(per_signer_hcom);
+  free(per_signer_hcom_storage);
+  (void)q_view; (void)ell_hat_bytes;
+  return ret;
 }

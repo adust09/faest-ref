@@ -470,11 +470,15 @@ parameter_data.set('FAEST_256_LAMBDA', 256)
 openssl = dependency('openssl', required: get_option('openssl'))
 valgrind = dependency('valgrind', required: get_option('valgrind'))
 valgrind_exec = find_program('valgrind', required: valgrind.found())
+openmp = dependency('openmp', required: get_option('openmp'))
 
 build_dependencies = []
 if openssl.found()
   build_dependencies += [openssl]
   defines += '-DHAVE_OPENSSL'
+endif
+if openmp.found()
+  build_dependencies += [openmp]
 endif
 
 valgrind_defines = []
@@ -545,7 +549,11 @@ include_directories = [include_directories('.')]
 faest_sources = files(
   'aes.c',
   'bavc.c',
+  'bavc_forest.c',
   'compat.c',
+  'faest_agg_aggregator.c',
+  'faest_agg_layout.c',
+  'faest_agg_signer.c',
   'faest_impl.c',
   'fields.c',
   'instances.c',

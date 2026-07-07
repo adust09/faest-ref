@@ -53,3 +53,9 @@ option(
   value: 'auto',
   description: 'doxygen API documentation',
 )
+option(
+  'openmp',
+  type: 'feature',
+  value: 'auto',
+  description: 'Use OpenMP for per-signer parallelism in the aggregate signature path',
+)
